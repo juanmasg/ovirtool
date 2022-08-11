@@ -7,6 +7,9 @@ from argparse import ArgumentParser
 from getpass import getpass
 from subprocess import Popen, PIPE
 
+import os
+import sys
+
 import keyring
 
 def connect(url, user, pw, pem):
@@ -20,6 +23,25 @@ def connect(url, user, pw, pem):
     conn.authenticate()
 
     return conn
+
+
+def retrieve_pem(host):
+    import ssl
+    import socket
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    conn = ctx.wrap_socket(sk, server_hostname=host)
+    conn.connect((host, 443))
+
+    der = conn.getpeercert(True)
+    pem = ssl.DER_cert_to_PEM_cert(der)
+
+    return pem
+
 
 class OVirt:
     _conn = None
@@ -78,22 +100,33 @@ class OVirt:
 
 parser = ArgumentParser()
 parser.add_argument("--host", required=True)
-parser.add_argument("--pem", required=True) # TODO: auto retrieve
 parser.add_argument("-u", "--user", required=True)
 parser.add_argument("-l", "--list-vms", action="store_true")
 parser.add_argument("-c", "--connect")
+parser.add_argument("--cache-server-certificate", action="store_true")
 
 args = parser.parse_args()
 
+pem_path = f"/tmp/.ovirtool-{args.host}.pem"
+
+if not os.path.exists(pem_path):
+
+    if not args.cache_server_certificate:
+        print(f"No PEM found for {args.host}. Use `--cache-server-certificate` once to retrieve it automatically", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Retrieving certificate from {args.host} into {pem_path}", file=sys.stderr)
+    pem_data = retrieve_pem(args.host)
+    with open(pem_path, "w") as f:
+        f.write(pem_data)
+
 url=f'https://{args.host}/ovirt-engine/api'
-
 conn = None
-
 pw = keyring.get_password(url, args.user)
 
 if not pw:
     pw = getpass(prompt="Password: ")
-    conn = connect(url, args.user, pw, args.pem)
+    conn = connect(url, args.user, pw, pem_path)
 
     save = input("Save password to keyring? (y/n): ")
     if save == 'y': 
@@ -102,9 +135,8 @@ if not pw:
     else:
         print("Not saving password to keyring")
 else:
-    conn = connect(url, args.user, pw, args.pem)
+    conn = connect(url, args.user, pw, pem_path)
     
-
 ovirt = OVirt(conn)
 
 if args.list_vms:
